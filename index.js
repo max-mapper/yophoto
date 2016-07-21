@@ -1,31 +1,80 @@
 var choo = require('choo')
 var html = require('choo/html')
 var imagesLoaded = require('imagesloaded')
+var hyperdrive = require('hyperdrive')
+var level = require('level-browserify')
+var concat = require('concat-stream')
+var parallel = require('run-parallel')
+var pump = require('pump')
 var googleImageLayout = require('./google-image-layout.js')
 var CreateControls = require('./create-controls.js')
 var debounce = require('./debounce.js')
+var fetchDat = require('./dat.js')
 
 module.exports = Gallery
 
-function Gallery (images, afterRender) {
-  if (!(this instanceof Gallery)) return new Gallery(images, afterRender)
+function Gallery (afterRender) {
+  if (!(this instanceof Gallery)) return new Gallery(afterRender)
   var self = this
   this.afterRender = afterRender
+  this.db = level('./dat.db')
+  this.drive = hyperdrive(this.db)
+    
   this.app = choo()
 
   this.app.model({
     namespace: 'gallery',
     state: {
-      images: images
+      images: []
     },
     reducers: {
-      increment: (action, state) => ({count: state.count + 1})
+      update: function (data, state) {
+        console.log('update reducer', [data, state])
+        return {images: data}
+      }
+    },
+    effects: {
+      load: function (action, state, send) {
+        console.log('load', [action, state])
+        fetchDat(action.key, self.drive, function (dat) {
+          console.log('initialized archive')
+          var list = dat.list({live: false}, function (err, items) {
+            console.log('list', items)
+            var files = []
+            var todo = items.map(function (item) {
+              return function (done) {
+                console.log('createFileReadStream', item)
+                dat.createFileReadStream(item).pipe(concat(function (filebuf) {
+                  files.push(filebuf)
+                  console.log('done', files)
+                  done()
+                }))
+              } 
+            })
+            parallel(todo, function (err) {
+              console.log('files', files)
+              var uris = files.map(function (file) {
+                var blob = new Blob([file], {'type': 'image/png'})
+                var bloburl = URL.createObjectURL(blob)
+                return bloburl
+                // var array = new Uint8Array()
+                // var b64 = btoa(String.fromCharCode.apply(null, array))
+                // return "data:image/png;base64,"+b64
+              })
+              send('gallery:update', uris, function done () {
+                console.log('update done')
+              })
+            })
+          })
+        })
+      }
     }
   })
 
   this.app.router(function (route) {
     return [
-      route('/', self.galleryView.bind(self))
+      route('/', self.homeView.bind(self)),
+      route('/:key', self.galleryView.bind(self))      
     ]
   })
   
@@ -59,7 +108,7 @@ Gallery.prototype._cssClasses = {
 Gallery.prototype._layout = function (el) {
   var images = el.querySelectorAll('img')
   var thumbs = el.querySelector('.' + this._cssClasses.THUMBS_BOX)
-  console.log(thumbs, el)
+
   var imgLoad = imagesLoaded(images)
 
   imgLoad.on('progress', function (instance, image) {
@@ -75,24 +124,24 @@ Gallery.prototype._layout = function (el) {
 
   imgLoad.on('fail', function (instance) {
     return console.error('fail')
-    var galleryEl = gallery._element
-    var alertBox = document.createElement('div')
-    alertBox.className = 'm-p-g__alertBox'
-    var alertBoxTitle = document.createElement('h2')
-    alertBoxTitle.innerHTML = 'Error'
-    var alertBoxMessage = document.createElement('p')
-    alertBox.appendChild(alertBoxTitle)
-    alertBox.appendChild(alertBoxMessage)
-    galleryEl.appendChild(alertBox)
-
-    var brokenImages = []
-    instance.images.forEach(function (image) {
-      if (!image.isLoaded) {
-        brokenImages.push(image.img.currentSrc)
-      }
-    })
-
-    alertBoxMessage.innerHTML = 'Failed to load:' + ' ' + brokenImages
+  //   var galleryEl = gallery._element
+  //   var alertBox = document.createElement('div')
+  //   alertBox.className = 'm-p-g__alertBox'
+  //   var alertBoxTitle = document.createElement('h2')
+  //   alertBoxTitle.innerHTML = 'Error'
+  //   var alertBoxMessage = document.createElement('p')
+  //   alertBox.appendChild(alertBoxTitle)
+  //   alertBox.appendChild(alertBoxMessage)
+  //   galleryEl.appendChild(alertBox)
+  //
+  //   var brokenImages = []
+  //   instance.images.forEach(function (image) {
+  //     if (!image.isLoaded) {
+  //       brokenImages.push(image.img.currentSrc)
+  //     }
+  //   })
+  //
+  //   alertBoxMessage.innerHTML = 'Failed to load:' + ' ' + brokenImages
   })
 
   // window.onresize = debounce(function () {
@@ -103,6 +152,10 @@ Gallery.prototype._layout = function (el) {
   // }, 25)
 }
 
+Gallery.prototype.homeView = function (state, prev, send) {
+  return html`<h1>welcome</h1>`
+}
+
 /**
  * Init the Gallery component.
  */
@@ -111,12 +164,18 @@ Gallery.prototype.galleryView = function (state, prev, send) {
   var self = this
   // var controls = CreateControls.init()
   // this._element.appendChild(controls)
+  var key = state.params.key
+  if (state.gallery.images.length === 0) {
+    send('gallery:load', { key: key })
+    return html`<h1>loading...</h1>`
+  }
+  console.log('galleryView', state, self)
   var el = html`
 		<div class="m-p-g">
       <div class="m-p-g__thumbs" data-images data-max-height="350">
         ${state.gallery.images.map(function (img) {
           return html`
-            <img src="${img.thumb}" data-full="${img.full}" class="m-p-g__thumbs-img" />
+            <img src="${img}" data-full="foo" class="m-p-g__thumbs-img" />
           `
         })}
       </div>
